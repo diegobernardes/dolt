@@ -176,7 +176,7 @@ const (
 const (
 	// SchemasTableName is the name of the dolt schema fragment table
 	SchemasTableName = "dolt_schemas"
-	// SchemasTablesIdCol is an incrementing integer that represents the insertion index.
+	// SchemasTablesIdCol is an incrementing integer that represents the insertion index. No longer used.
 	SchemasTablesIdCol = "id"
 	// Currently: `view` or `trigger`.
 	SchemasTablesTypeCol = "type"
@@ -185,7 +185,13 @@ const (
 	// The schema fragment associated with the database entity.
 	// For example, the SELECT statement for a CREATE VIEW.
 	SchemasTablesFragmentCol = "fragment"
-	// The name of the index that is on the table.
+	// The time that the entity was created at.
+	SchemasTablesCreatedAtCol = "createdat"
+	// The time that the entity was last modified at.
+	SchemasTablesModifiedAtCol = "modifiedat"
+	// Any metadata belonging to the entity.
+	SchemasTablesMetadataCol = "metadata"
+	// The name of the index that is on the table. No longer used.
 	SchemasTablesIndexName = "fragment_name"
 )
 

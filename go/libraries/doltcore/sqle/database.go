@@ -94,6 +94,7 @@ var _ sql.TableDropper = Database{}
 var _ sql.TableCreator = Database{}
 var _ sql.TableRenamer = Database{}
 var _ sql.TriggerDatabase = Database{}
+var _ sql.StoredProcedureDatabase = Database{}
 
 // NewDatabase returns a new dolt database to use in queries.
 func NewDatabase(name string, dbData env.DbData) Database {
@@ -664,14 +665,22 @@ func (db Database) Flush(ctx *sql.Context) error {
 // it can exist in a sql session later. Returns sql.ErrExistingView if a view
 // with that name already exists.
 func (db Database) CreateView(ctx *sql.Context, name string, definition string) error {
-	return db.addFragToSchemasTable(ctx, "view", name, definition, sql.ErrExistingView.New(name))
+	frag := schemaFragment{
+		Name:       name,
+		Type:       schemaFragmentType_View,
+		Fragment:   definition,
+		CreatedAt:  time.Unix(0, 0).UTC(),
+		ModifiedAt: time.Unix(0, 0).UTC(),
+		Metadata:   "",
+	}
+	return db.addFragToSchemasTable(ctx, frag, sql.ErrExistingView.New(name))
 }
 
 // DropView implements sql.ViewDropper. Removes a view from persistence in the
 // dolt database. Returns sql.ErrNonExistingView if the view did not
 // exist.
 func (db Database) DropView(ctx *sql.Context, name string) error {
-	return db.dropFragFromSchemasTable(ctx, "view", name, sql.ErrNonExistingView.New(name))
+	return db.dropFragFromSchemasTable(ctx, schemaFragmentType_View, name, sql.ErrNonExistingView.New(name))
 }
 
 // GetTriggers implements sql.TriggerDatabase.
@@ -708,7 +717,7 @@ func (db Database) GetTriggers(ctx *sql.Context) ([]sql.TriggerDefinition, error
 		if err != nil {
 			return true, err
 		}
-		if typeColVal, ok := dRow.GetColVal(typeCol.Tag); ok && typeColVal.Equals(types.String("trigger")) {
+		if typeColVal, ok := dRow.GetColVal(typeCol.Tag); ok && typeColVal.Equals(types.String(schemaFragmentType_Trigger)) {
 			name, ok := dRow.GetColVal(nameCol.Tag)
 			if !ok {
 				taggedVals, _ := row.GetTaggedVals(dRow)
@@ -734,10 +743,16 @@ func (db Database) GetTriggers(ctx *sql.Context) ([]sql.TriggerDefinition, error
 
 // CreateTrigger implements sql.TriggerDatabase.
 func (db Database) CreateTrigger(ctx *sql.Context, definition sql.TriggerDefinition) error {
+	frag := schemaFragment{
+		Name:       definition.Name,
+		Type:       schemaFragmentType_Trigger,
+		Fragment:   definition.CreateStatement,
+		CreatedAt:  time.Unix(0, 0).UTC(),
+		ModifiedAt: time.Unix(0, 0).UTC(),
+		Metadata:   "",
+	}
 	return db.addFragToSchemasTable(ctx,
-		"trigger",
-		definition.Name,
-		definition.CreateStatement,
+		frag,
 		fmt.Errorf("triggers `%s` already exists", definition.Name), //TODO: add a sql error and return that instead
 	)
 }
@@ -745,49 +760,120 @@ func (db Database) CreateTrigger(ctx *sql.Context, definition sql.TriggerDefinit
 // DropTrigger implements sql.TriggerDatabase.
 func (db Database) DropTrigger(ctx *sql.Context, name string) error {
 	//TODO: add a sql error and use that as the param error instead
-	return db.dropFragFromSchemasTable(ctx, "trigger", name, sql.ErrTriggerDoesNotExist.New(name))
+	return db.dropFragFromSchemasTable(ctx, schemaFragmentType_Trigger, name, sql.ErrTriggerDoesNotExist.New(name))
 }
 
-func (db Database) addFragToSchemasTable(ctx *sql.Context, fragType, name, definition string, existingErr error) (retErr error) {
+// GetStoredProcedures implements sql.StoredProcedureDatabase.
+func (db Database) GetStoredProcedures(ctx *sql.Context) ([]sql.StoredProcedureDetails, error) {
+	missingValue := errors.NewKind("missing `%s` value for procedure row: (%s)")
+	schemaFmtErr := fmt.Errorf("`%s` schema in unexpected format", doltdb.SchemasTableName)
+
+	sqlTbl, ok, err := db.GetTableInsensitive(ctx, doltdb.SchemasTableName)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+	tbl := sqlTbl.(*WritableDoltTable)
+
+	typeCol, ok := tbl.sch.GetAllCols().GetByName(doltdb.SchemasTablesTypeCol)
+	if !ok {
+		return nil, schemaFmtErr
+	}
+	nameCol, ok := tbl.sch.GetAllCols().GetByName(doltdb.SchemasTablesNameCol)
+	if !ok {
+		return nil, schemaFmtErr
+	}
+	fragCol, ok := tbl.sch.GetAllCols().GetByName(doltdb.SchemasTablesFragmentCol)
+	if !ok {
+		return nil, schemaFmtErr
+	}
+	createdAtCol, ok := tbl.sch.GetAllCols().GetByName(doltdb.SchemasTablesCreatedAtCol)
+	if !ok {
+		return nil, schemaFmtErr
+	}
+	modifiedAtCol, ok := tbl.sch.GetAllCols().GetByName(doltdb.SchemasTablesModifiedAtCol)
+	if !ok {
+		return nil, schemaFmtErr
+	}
+
+	rowData, err := tbl.table.GetRowData(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var spds []sql.StoredProcedureDetails
+	err = rowData.Iter(ctx, func(key, val types.Value) (stop bool, err error) {
+		dRow, err := row.FromNoms(tbl.sch, key.(types.Tuple), val.(types.Tuple))
+		if err != nil {
+			return true, err
+		}
+		if typeColVal, ok := dRow.GetColVal(typeCol.Tag); ok && typeColVal.Equals(types.String(schemaFragmentType_Procedure)) {
+			name, ok := dRow.GetColVal(nameCol.Tag)
+			if !ok {
+				taggedVals, _ := row.GetTaggedVals(dRow)
+				return true, missingValue.New(doltdb.SchemasTablesNameCol, taggedVals)
+			}
+			createStmt, ok := dRow.GetColVal(fragCol.Tag)
+			if !ok {
+				taggedVals, _ := row.GetTaggedVals(dRow)
+				return true, missingValue.New(doltdb.SchemasTablesFragmentCol, taggedVals)
+			}
+			createdAt, ok := dRow.GetColVal(createdAtCol.Tag)
+			if !ok {
+				taggedVals, _ := row.GetTaggedVals(dRow)
+				return true, missingValue.New(doltdb.SchemasTablesCreatedAtCol, taggedVals)
+			}
+			modifiedAt, ok := dRow.GetColVal(modifiedAtCol.Tag)
+			if !ok {
+				taggedVals, _ := row.GetTaggedVals(dRow)
+				return true, missingValue.New(doltdb.SchemasTablesModifiedAtCol, taggedVals)
+			}
+			spds = append(spds, sql.StoredProcedureDetails{
+				Name:            string(name.(types.String)),
+				CreateStatement: string(createStmt.(types.String)),
+				CreatedAt:       time.Time(createdAt.(types.Timestamp)),
+				ModifiedAt:      time.Time(modifiedAt.(types.Timestamp)),
+			})
+		}
+		return false, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return spds, nil
+}
+
+// SaveStoredProcedure implements sql.StoredProcedureDatabase.
+func (db Database) SaveStoredProcedure(ctx *sql.Context, spd sql.StoredProcedureDetails) error {
+	frag := schemaFragment{
+		Name:       spd.Name,
+		Type:       schemaFragmentType_Procedure,
+		Fragment:   spd.CreateStatement,
+		CreatedAt:  spd.CreatedAt,
+		ModifiedAt: spd.ModifiedAt,
+		Metadata:   "",
+	}
+	return db.addFragToSchemasTable(ctx, frag, sql.ErrStoredProcedureAlreadyExists.New(spd.Name))
+}
+
+// DropStoredProcedure implements sql.StoredProcedureDatabase.
+func (db Database) DropStoredProcedure(ctx *sql.Context, name string) error {
+	return db.dropFragFromSchemasTable(ctx, schemaFragmentType_Procedure, name, sql.ErrStoredProcedureDoesNotExist.New(name))
+}
+
+func (db Database) addFragToSchemasTable(ctx *sql.Context, frag schemaFragment, existingErr error) (retErr error) {
 	tbl, err := GetOrCreateDoltSchemasTable(ctx, db)
 	if err != nil {
 		return err
 	}
 
-	_, exists, err := fragFromSchemasTable(ctx, tbl, fragType, name)
+	_, exists, err := fragFromSchemasTable(ctx, tbl, frag.Type, frag.Name)
 	if err != nil {
 		return err
 	}
 	if exists {
 		return existingErr
-	}
-
-	// If rows exist, then grab the highest id and add 1 to get the new id
-	indexToUse := int64(1)
-	te, err := db.TableEditSession(ctx).GetTableEditor(ctx, doltdb.SchemasTableName, tbl.sch)
-	if err != nil {
-		return err
-	}
-	dTable, err := te.Table(ctx)
-	if err != nil {
-		return err
-	}
-	rowData, err := dTable.GetRowData(ctx)
-	if err != nil {
-		return err
-	}
-	if rowData.Len() > 0 {
-		keyTpl, _, err := rowData.Last(ctx)
-		if err != nil {
-			return err
-		}
-		if keyTpl != nil {
-			key, err := keyTpl.(types.Tuple).Get(1)
-			if err != nil {
-				return err
-			}
-			indexToUse = int64(key.(types.Int)) + 1
-		}
 	}
 
 	// Insert the new row into the db
@@ -798,10 +884,17 @@ func (db Database) addFragToSchemasTable(ctx *sql.Context, fragType, name, defin
 			retErr = err
 		}
 	}()
-	return inserter.Insert(ctx, sql.Row{fragType, name, definition, indexToUse})
+	return inserter.Insert(ctx, sql.Row{
+		string(frag.Type),
+		frag.Name,
+		frag.Fragment,
+		frag.CreatedAt,
+		frag.ModifiedAt,
+		frag.Metadata,
+	})
 }
 
-func (db Database) dropFragFromSchemasTable(ctx *sql.Context, fragType, name string, missingErr error) error {
+func (db Database) dropFragFromSchemasTable(ctx *sql.Context, fragType schemaFragmentType, name string, missingErr error) error {
 	stbl, found, err := db.GetTableInsensitive(ctx, doltdb.SchemasTableName)
 	if err != nil {
 		return err

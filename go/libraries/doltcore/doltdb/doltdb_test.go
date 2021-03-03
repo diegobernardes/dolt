@@ -168,11 +168,14 @@ func TestSystemTableTags(t *testing.T) {
 		assert.Equal(t, queryCatalogMin+4, schema.QueryCatalogDescriptionTag)
 	})
 	t.Run("dolt_schemas tags", func(t *testing.T) {
-		doltSchemasMin := sysTableMin + uint64(4007)
+		doltSchemasMin := sysTableMin + uint64(4012)
 		assert.Equal(t, doltSchemasMin+0, schema.DoltSchemasIdTag)
 		assert.Equal(t, doltSchemasMin+1, schema.DoltSchemasTypeTag)
 		assert.Equal(t, doltSchemasMin+2, schema.DoltSchemasNameTag)
 		assert.Equal(t, doltSchemasMin+3, schema.DoltSchemasFragmentTag)
+		assert.Equal(t, doltSchemasMin+4, schema.DoltSchemasCreatedAtTag)
+		assert.Equal(t, doltSchemasMin+5, schema.DoltSchemasModifiedAtTag)
+		assert.Equal(t, doltSchemasMin+6, schema.DoltSchemasMetadataTag)
 	})
 }
 

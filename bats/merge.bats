@@ -330,13 +330,10 @@ SQL
     dolt add . && dolt commit -m "added view on table test2"
 
     dolt checkout master
-    run dolt merge other
-    [ "$status" -eq 0 ]
-    [[ "$output" =~ "CONFLICT" ]] || false
-    run dolt conflicts resolve --theirs dolt_schemas
-    [ "$status" -eq 0 ]
+    dolt merge other
     run dolt sql -q "select name from dolt_schemas" -r csv
     [ "$status" -eq 0 ]
+    [[ "$output" =~ "pkpk" ]] || false
     [[ "$output" =~ "c1c1" ]] || false
 }
 

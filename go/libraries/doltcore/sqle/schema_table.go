@@ -17,6 +17,7 @@ package sqle
 import (
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/dolthub/go-mysql-server/sql"
 
@@ -26,6 +27,25 @@ import (
 	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/sqlutil"
 	"github.com/dolthub/dolt/go/store/types"
 )
+
+// schemaFragmentType is the fragment type for an entry in the dolt_schemas table.
+type schemaFragmentType string
+
+const (
+	schemaFragmentType_View      schemaFragmentType = "view"
+	schemaFragmentType_Trigger   schemaFragmentType = "trigger"
+	schemaFragmentType_Procedure schemaFragmentType = "procedure"
+)
+
+// schemaFragment represents an entry in the dolt_schemas table.
+type schemaFragment struct {
+	Name       string
+	Type       schemaFragmentType
+	Fragment   string
+	CreatedAt  time.Time
+	ModifiedAt time.Time
+	Metadata   string
+}
 
 // The fixed SQL schema for the `dolt_schemas` table.
 func SchemasTableSqlSchema() sql.Schema {
@@ -39,10 +59,12 @@ func SchemasTableSqlSchema() sql.Schema {
 // The fixed dolt schema for the `dolt_schemas` table.
 func SchemasTableSchema() schema.Schema {
 	colColl := schema.NewColCollection(
-		schema.NewColumn(doltdb.SchemasTablesTypeCol, schema.DoltSchemasTypeTag, types.StringKind, false),
-		schema.NewColumn(doltdb.SchemasTablesNameCol, schema.DoltSchemasNameTag, types.StringKind, false),
+		schema.NewColumn(doltdb.SchemasTablesTypeCol, schema.DoltSchemasTypeTag, types.StringKind, true, schema.NotNullConstraint{}),
+		schema.NewColumn(doltdb.SchemasTablesNameCol, schema.DoltSchemasNameTag, types.StringKind, true, schema.NotNullConstraint{}),
 		schema.NewColumn(doltdb.SchemasTablesFragmentCol, schema.DoltSchemasFragmentTag, types.StringKind, false),
-		schema.NewColumn(doltdb.SchemasTablesIdCol, schema.DoltSchemasIdTag, types.IntKind, true, schema.NotNullConstraint{}),
+		schema.NewColumn(doltdb.SchemasTablesCreatedAtCol, schema.DoltSchemasCreatedAtTag, types.TimestampKind, false),
+		schema.NewColumn(doltdb.SchemasTablesModifiedAtCol, schema.DoltSchemasModifiedAtTag, types.TimestampKind, false),
+		schema.NewColumn(doltdb.SchemasTablesMetadataCol, schema.DoltSchemasMetadataTag, types.StringKind, false),
 	)
 	return schema.MustSchemaFromCols(colColl)
 }
@@ -60,9 +82,13 @@ func GetOrCreateDoltSchemasTable(ctx *sql.Context, db Database) (retTbl *Writabl
 	var rowsToAdd []sql.Row
 	if found {
 		schemasTable := tbl.(*WritableDoltTable)
-		// Old schemas table does not contain the `id` column.
-		if !tbl.Schema().Contains(doltdb.SchemasTablesIdCol, doltdb.SchemasTableName) {
-			root, rowsToAdd, err = migrateOldSchemasTableToNew(ctx, db, root, schemasTable)
+		if len(tbl.Schema()) == 3 { // v1 schemas table contains 3 columns
+			root, rowsToAdd, err = migrateV1SchemasTableToV3(ctx, db, root, schemasTable)
+			if err != nil {
+				return nil, err
+			}
+		} else if len(tbl.Schema()) == 4 { // v2 schemas table contains 4 columns
+			root, rowsToAdd, err = migrateV2SchemasTableToV3(ctx, db, root, schemasTable)
 			if err != nil {
 				return nil, err
 			}
@@ -85,20 +111,6 @@ func GetOrCreateDoltSchemasTable(ctx *sql.Context, db Database) (retTbl *Writabl
 	}
 	if !found {
 		return nil, sql.ErrTableNotFound.New("dolt_schemas")
-	}
-	// Create a unique index on the old primary key columns (type, name)
-	err = (&AlterableDoltTable{*tbl.(*WritableDoltTable)}).CreateIndex(ctx,
-		doltdb.SchemasTablesIndexName,
-		sql.IndexUsing_Default,
-		sql.IndexConstraint_Unique,
-		[]sql.IndexColumn{
-			{Name: doltdb.SchemasTablesTypeCol, Length: 0},
-			{Name: doltdb.SchemasTablesNameCol, Length: 0},
-		},
-		"",
-	)
-	if err != nil {
-		return nil, err
 	}
 	// If there was an old schemas table that contained rows, then add that data here
 	root, err = db.GetRoot(ctx)
@@ -136,7 +148,7 @@ func GetOrCreateDoltSchemasTable(ctx *sql.Context, db Database) (retTbl *Writabl
 	return tbl.(*WritableDoltTable), nil
 }
 
-func migrateOldSchemasTableToNew(
+func migrateV1SchemasTableToV3(
 	ctx *sql.Context,
 	db Database,
 	root *doltdb.RootValue,
@@ -146,7 +158,51 @@ func migrateOldSchemasTableToNew(
 	[]sql.Row,
 	error,
 ) {
-	// Copy all of the old data over and add an index column
+	// Copy all of the old data over and add the new columns
+	var rowsToAdd []sql.Row
+	rowData, err := schemasTable.table.GetRowData(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	err = rowData.IterAll(ctx, func(key, val types.Value) error {
+		dRow, err := row.FromNoms(schemasTable.sch, key.(types.Tuple), val.(types.Tuple))
+		if err != nil {
+			return err
+		}
+		sqlRow, err := sqlutil.DoltRowToSqlRow(dRow, schemasTable.sch)
+		if err != nil {
+			return err
+		}
+		// append the new createdat, modifiedat, and metadata to each row
+		sqlRow = append(sqlRow, time.Unix(0, 0).UTC(), time.Unix(0, 0).UTC(), "")
+		rowsToAdd = append(rowsToAdd, sqlRow)
+		return nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	err = db.DropTable(ctx, doltdb.SchemasTableName)
+	if err != nil {
+		return nil, nil, err
+	}
+	root, err = db.GetRoot(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	return root, rowsToAdd, nil
+}
+
+func migrateV2SchemasTableToV3(
+	ctx *sql.Context,
+	db Database,
+	root *doltdb.RootValue,
+	schemasTable *WritableDoltTable,
+) (
+	*doltdb.RootValue,
+	[]sql.Row,
+	error,
+) {
+	// Copy all of the old data over and add the new columns
 	var rowsToAdd []sql.Row
 	rowData, err := schemasTable.table.GetRowData(ctx)
 	if err != nil {
@@ -162,8 +218,8 @@ func migrateOldSchemasTableToNew(
 		if err != nil {
 			return err
 		}
-		// prepend the new id to each row
-		sqlRow = append(sqlRow, id)
+		// remove id and append the new createdat, modifiedat, and metadata to each row
+		sqlRow = append(sqlRow[:3], time.Unix(0, 0).UTC(), time.Unix(0, 0).UTC(), "")
 		rowsToAdd = append(rowsToAdd, sqlRow)
 		id++
 		return nil
@@ -183,23 +239,23 @@ func migrateOldSchemasTableToNew(
 }
 
 // fragFromSchemasTable returns the row with the given schema fragment if it exists.
-func fragFromSchemasTable(ctx *sql.Context, tbl *WritableDoltTable, fragType string, name string) (sql.Row, bool, error) {
+func fragFromSchemasTable(ctx *sql.Context, tbl *WritableDoltTable, fragType schemaFragmentType, name string) (sql.Row, bool, error) {
 	indexes, err := tbl.GetIndexes(ctx)
 	if err != nil {
 		return nil, false, err
 	}
 	var fragNameIndex sql.Index
 	for _, index := range indexes {
-		if index.ID() == doltdb.SchemasTablesIndexName {
+		if index.ID() == "PRIMARY" {
 			fragNameIndex = index
 			break
 		}
 	}
 	if fragNameIndex == nil {
-		return nil, false, fmt.Errorf("could not find index `%s` on system table `%s`", doltdb.SchemasTablesIndexName, doltdb.SchemasTableName)
+		return nil, false, fmt.Errorf("could not find primary key index on system table `%s`", doltdb.SchemasTableName)
 	}
 
-	indexLookup, err := fragNameIndex.Get(fragType, name)
+	indexLookup, err := fragNameIndex.Get(string(fragType), name)
 	if err != nil {
 		return nil, false, err
 	}

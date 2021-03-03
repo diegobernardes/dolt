@@ -17,6 +17,7 @@ package sqle
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/dolthub/go-mysql-server/sql"
 	"github.com/google/uuid"
@@ -427,10 +428,18 @@ var systemTableInsertTests = []InsertTest{
 	{
 		Name:            "insert into dolt_schemas",
 		AdditionalSetup: CreateTableFn(doltdb.SchemasTableName, schemasTableDoltSchema()),
-		InsertQuery:     "insert into dolt_schemas (id, type, name, fragment) values (1, 'view', 'name', 'select 2+2 from dual')",
-		SelectQuery:     "select * from dolt_schemas ORDER BY id",
+		InsertQuery: "insert into dolt_schemas (type, name, fragment, createdat, modifiedat, metadata) values " +
+			"('view', 'name', 'select 2+2 from dual', '1970-01-01 00:00:00', '1970-01-01 00:00:00', '')",
+		SelectQuery: "select * from dolt_schemas ORDER BY name",
 		ExpectedRows: ToSqlRows(CompressSchema(schemasTableDoltSchema()),
-			NewRow(types.String("view"), types.String("name"), types.String("select 2+2 from dual"), types.Int(1)),
+			NewRow(
+				types.String("view"),
+				types.String("name"),
+				types.String("select 2+2 from dual"),
+				types.Timestamp(time.Unix(0, 0).UTC()),
+				types.Timestamp(time.Unix(0, 0).UTC()),
+				types.String(""),
+			),
 		),
 		ExpectedSchema: CompressSchema(schemasTableDoltSchema()),
 	},

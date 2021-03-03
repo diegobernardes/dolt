@@ -17,6 +17,7 @@ package sqle
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/dolthub/go-mysql-server/sql"
 	"github.com/stretchr/testify/assert"
@@ -29,7 +30,7 @@ import (
 	"github.com/dolthub/dolt/go/store/types"
 )
 
-func TestSchemaTableRecreation(t *testing.T) {
+func TestV1SchemaTableRecreation(t *testing.T) {
 	ctx := NewTestSQLCtx(context.Background())
 	dEnv := dtestutils.CreateTestEnv()
 	db := NewDatabase("dolt", dEnv.DbData())
@@ -37,7 +38,7 @@ func TestSchemaTableRecreation(t *testing.T) {
 	require.NoError(t, err)
 	ctx.SetCurrentDatabase(db.Name())
 
-	err = db.createSqlTable(ctx, doltdb.SchemasTableName, sql.Schema{ // schema of dolt_schemas table before the change
+	err = db.createSqlTable(ctx, doltdb.SchemasTableName, sql.Schema{ // schema of v1 dolt_schemas table
 		{Name: doltdb.SchemasTablesTypeCol, Type: sql.Text, Source: doltdb.SchemasTableName, PrimaryKey: true},
 		{Name: doltdb.SchemasTablesNameCol, Type: sql.Text, Source: doltdb.SchemasTableName, PrimaryKey: true},
 		{Name: doltdb.SchemasTablesFragmentCol, Type: sql.Text, Source: doltdb.SchemasTableName, PrimaryKey: false},
@@ -76,8 +77,8 @@ func TestSchemaTableRecreation(t *testing.T) {
 	rowData, err = tbl.table.GetRowData(ctx)
 	require.NoError(t, err)
 	expectedVals = []sql.Row{
-		{"view", "view1", "SELECT v1 FROM test;", int64(1)},
-		{"view", "view2", "SELECT v2 FROM test;", int64(2)},
+		{"view", "view1", "SELECT v1 FROM test;", time.Unix(0, 0).UTC(), time.Unix(0, 0).UTC(), ""},
+		{"view", "view2", "SELECT v2 FROM test;", time.Unix(0, 0).UTC(), time.Unix(0, 0).UTC(), ""},
 	}
 	index = 0
 	_ = rowData.IterAll(ctx, func(keyTpl, valTpl types.Value) error {
@@ -89,9 +90,67 @@ func TestSchemaTableRecreation(t *testing.T) {
 		index++
 		return nil
 	})
+}
 
-	indexes := tbl.sch.Indexes().AllIndexes()
-	require.Len(t, indexes, 1)
-	assert.Equal(t, true, indexes[0].IsUnique())
-	assert.Equal(t, doltdb.SchemasTablesIndexName, indexes[0].Name())
+func TestV2SchemaTableRecreation(t *testing.T) {
+	ctx := NewTestSQLCtx(context.Background())
+	dEnv := dtestutils.CreateTestEnv()
+	db := NewDatabase("dolt", dEnv.DbData())
+	err := DSessFromSess(ctx.Session).AddDB(ctx, db)
+	require.NoError(t, err)
+	ctx.SetCurrentDatabase(db.Name())
+
+	err = db.createSqlTable(ctx, doltdb.SchemasTableName, sql.Schema{ // schema of v2 dolt_schemas table
+		{Name: doltdb.SchemasTablesTypeCol, Type: sql.Text, Source: doltdb.SchemasTableName, PrimaryKey: false},
+		{Name: doltdb.SchemasTablesNameCol, Type: sql.Text, Source: doltdb.SchemasTableName, PrimaryKey: false},
+		{Name: doltdb.SchemasTablesFragmentCol, Type: sql.Text, Source: doltdb.SchemasTableName, PrimaryKey: false},
+		{Name: doltdb.SchemasTablesIdCol, Type: sql.Int64, Source: doltdb.SchemasTableName, PrimaryKey: true},
+	})
+	require.NoError(t, err)
+	sqlTbl, found, err := db.GetTableInsensitive(ctx, doltdb.SchemasTableName)
+	require.NoError(t, err)
+	require.True(t, found)
+	inserter := sqlTbl.(*WritableDoltTable).Inserter(ctx)
+	err = inserter.Insert(ctx, sql.Row{"view", "view1", "SELECT v1 FROM test;", int64(1)})
+	require.NoError(t, err)
+	err = inserter.Insert(ctx, sql.Row{"view", "view2", "SELECT v2 FROM test;", int64(2)})
+	require.NoError(t, err)
+	err = inserter.Close(ctx)
+	require.NoError(t, err)
+
+	rowData, err := sqlTbl.(*WritableDoltTable).table.GetRowData(ctx)
+	require.NoError(t, err)
+	expectedVals := []sql.Row{
+		{"view", "view1", "SELECT v1 FROM test;", int64(1)},
+		{"view", "view2", "SELECT v2 FROM test;", int64(2)},
+	}
+	index := 0
+	_ = rowData.IterAll(ctx, func(keyTpl, valTpl types.Value) error {
+		dRow, err := row.FromNoms(sqlTbl.(*WritableDoltTable).sch, keyTpl.(types.Tuple), valTpl.(types.Tuple))
+		require.NoError(t, err)
+		sqlRow, err := sqlutil.DoltRowToSqlRow(dRow, sqlTbl.(*WritableDoltTable).sch)
+		require.NoError(t, err)
+		assert.Equal(t, expectedVals[index], sqlRow)
+		index++
+		return nil
+	})
+
+	tbl, err := GetOrCreateDoltSchemasTable(ctx, db) // removes the old table and recreates it with the new schema
+	require.NoError(t, err)
+	rowData, err = tbl.table.GetRowData(ctx)
+	require.NoError(t, err)
+	expectedVals = []sql.Row{
+		{"view", "view1", "SELECT v1 FROM test;", time.Unix(0, 0).UTC(), time.Unix(0, 0).UTC(), ""},
+		{"view", "view2", "SELECT v2 FROM test;", time.Unix(0, 0).UTC(), time.Unix(0, 0).UTC(), ""},
+	}
+	index = 0
+	_ = rowData.IterAll(ctx, func(keyTpl, valTpl types.Value) error {
+		dRow, err := row.FromNoms(tbl.sch, keyTpl.(types.Tuple), valTpl.(types.Tuple))
+		require.NoError(t, err)
+		sqlRow, err := sqlutil.DoltRowToSqlRow(dRow, tbl.sch)
+		require.NoError(t, err)
+		assert.Equal(t, expectedVals[index], sqlRow)
+		index++
+		return nil
+	})
 }

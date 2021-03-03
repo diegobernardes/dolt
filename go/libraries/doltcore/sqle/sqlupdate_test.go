@@ -17,6 +17,7 @@ package sqle
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/dolthub/go-mysql-server/sql"
 	"github.com/google/uuid"
@@ -408,12 +409,21 @@ var systemTableUpdateTests = []UpdateTest{
 				types.String("view"),
 				types.String("name"),
 				types.String("select 2+2 from dual"),
-				types.Int(1),
+				types.Timestamp(time.Unix(0, 0).UTC()),
+				types.Timestamp(time.Unix(0, 0).UTC()),
+				types.String(""),
 			)),
 		UpdateQuery: "update dolt_schemas set type = 'not a view'",
 		SelectQuery: "select * from dolt_schemas",
 		ExpectedRows: ToSqlRows(CompressSchema(schemasTableDoltSchema()),
-			NewRow(types.String("not a view"), types.String("name"), types.String("select 2+2 from dual"), types.Int(1)),
+			NewRow(
+				types.String("not a view"),
+				types.String("name"),
+				types.String("select 2+2 from dual"),
+				types.Timestamp(time.Unix(0, 0).UTC()),
+				types.Timestamp(time.Unix(0, 0).UTC()),
+				types.String(""),
+			),
 		),
 		ExpectedSchema: CompressSchema(schemasTableDoltSchema()),
 	},
